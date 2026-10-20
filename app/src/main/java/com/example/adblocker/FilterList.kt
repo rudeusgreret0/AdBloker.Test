@@ -157,12 +157,7 @@ data class FilterStatus(
 
 /**
  * Self-contained parser, compiler, and 24-hour background cache manager for
- * EasyList, EasyPrivacy, and uBlock-style anti-adblock rules.
- *
- * HOW TO REUSE IN YOUR APP:
- * Copy `FilterList.kt` and `AdBlocker.kt` into your project. `AdBlocker.init(context)`
- * automatically loads the bundled rules immediately and refreshes EasyList + EasyPrivacy
- * in the background every 24 hours.
+ * EasyList, EasyPrivacy, and uBlock-style video & anti-adblock rules.
  */
 object FilterList {
 
@@ -172,11 +167,10 @@ object FilterList {
   private const val EASYLIST_CACHE_FILE = "easylist.txt"
   private const val EASYPRIVACY_CACHE_FILE = "easyprivacy.txt"
   private const val REFRESH_INTERVAL_MS = 24L * 60L * 60L * 1000L // 24 hours
-  private const val MAX_COSMETIC_SELECTORS = 1400
+  private const val MAX_COSMETIC_SELECTORS = 1800
 
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-  // Common two-level public suffixes so eTLD+1 (first-party vs third-party) is accurate.
   private val TWO_PART_TLDS =
     hashSetOf(
       "co.uk", "org.uk", "ac.uk", "gov.uk",
@@ -199,12 +193,21 @@ object FilterList {
     )
 
   /**
-   * Safe generic cosmetic selectors that hide real ad iframes and third-party widgets
-   * WITHOUT triggering anti-adblock bait checks on `.adsbox` or `.ad-banner`.
-   * (Bait classes are handled stealthily in JavaScript by spoofing their offsetHeight/offsetWidth).
+   * Comprehensive generic cosmetic selectors from EasyList + video/streaming ad containers.
+   * Collapses ad slots and wrapper boxes completely so white/empty boxes never remain on screen.
+   * (Anti-adblock bait checks on these classes are intercepted and spoofed by our JS proxy).
    */
   val DEFAULT_COSMETIC_SELECTORS =
     listOf(
+      "ins.adsbygoogle",
+      ".adsbygoogle",
+      "ins[class*='eas']",
+      "ins[data-ad-provider]",
+      "ins[data-zoneid]",
+      "div[data-zone]",
+      "[id^='google_ads_iframe']",
+      "[id^='div-gpt-ad']",
+      "[data-google-query-id]",
       "iframe[src*='doubleclick.net']",
       "iframe[src*='googlesyndication.com']",
       "iframe[src*='adnxs.com']",
@@ -225,35 +228,64 @@ object FilterList {
       "iframe[src*='a-ads.com']",
       "iframe[src*='propellerads.com']",
       "iframe[src*='adsterra.com']",
-      "iframe[id^='google_ads_iframe']",
-      "[id^='div-gpt-ad']",
-      "[data-google-query-id]",
+      "iframe[src*='bidgear.com']",
+      "iframe[src*='clickadu.com']",
+      "iframe[id^='google_ads_']",
+      ".ad-banner",
+      ".ad-container",
+      ".ad-wrapper",
+      ".ad-slot",
+      ".ad-unit",
+      ".ad-placeholder",
+      ".ad-leaderboard",
+      ".ad-sidebar",
+      ".ad-rectangle",
+      ".ad-billboard",
+      ".ad-sticky",
+      ".ad-overlay",
+      ".adbox",
+      ".adslot",
+      ".adsbox",
+      ".advert",
+      ".advertisement",
+      ".advertising-banner",
+      ".sponsored-content",
+      ".sponsored-banner",
+      ".banner-ad",
+      ".top-ad",
+      ".bottom-ad",
+      ".player-ad",
+      ".video-ad",
+      ".preroll-ad",
       ".taboola-widget",
       ".trc_rbox_container",
       ".OUTBRAIN",
       "#taboola-below-article-thumbnails",
       "#outbrain_widget_0",
+      "[class*='sp_message_container']",
       "[id*='taboola-']",
       "[id*='outbrain-']",
       "[id^='mgid_']",
       ".mgbox",
-      "ins.eas6a97888e",
-      "ins[data-ad-Provider]",
-      "ins[data-zoneid]",
-      "div[data-zone]",
       "[data-ad-slot]",
-      "[data-ad-client]"
+      "[data-ad-client]",
+      "[data-ad-unit]",
+      "[data-testid='ad-container']",
+      "[aria-label='advertisement']",
+      "[aria-label='Advertisement']"
     )
 
   /**
    * Bundled offline fallback filter list combining:
-   * 1. Major ad networks (Google, DoubleClick, Rubicon, OpenX, Criteo, Amazon, Taboola, Outbrain)
-   * 2. Video, streaming & anime site ad networks (ExoClick, Magsrv, Realsrv, Pemsrv, TSyndicate,
+   * 1. Major programmatic ad networks
+   * 2. Video player ad servers (VAST, VMAP, IMA, JWPlayer ads, VideoJS ads, Primis, Connatix,
+   *    AnyClip, Playwire, Aniview, Vidazoo, FreeWheel, SpringServe, SpotX, LKQD)
+   * 3. Streaming, anime & tube site ad networks (ExoClick, Magsrv, Realsrv, Pemsrv, TSyndicate,
    *    AdSpyglass, JuicyAds, TrafficJunky, TwinRed, Bidgear, Galaksion, RollerAds, A-Ads, Clickadu,
    *    Adsterra, PropellerAds, HilltopAds, Evadav, RichPush, Clickaine, PopAds, PopCash, OnClickAds)
-   * 3. Anti-adblock & bait script servers (Admiral, html-load.com, BlockAdBlock, FuckAdBlock, etc.)
-   * 4. EasyPrivacy trackers, session recorders & telemetry
-   * 5. Essential first-party CDN & video streaming whitelists (`@@`) so videos & sites never break.
+   * 4. Anti-adblock & recovery providers (Admiral, html-load.com, BlockAdBlock, FuckAdBlock, etc.)
+   * 5. EasyPrivacy trackers, telemetry & session recorders
+   * 6. Essential CDN & video streaming whitelists (`@@`) so videos & websites never break.
    */
   val BUNDLED_FALLBACK_RULES =
     listOf(
@@ -276,8 +308,57 @@ object FilterList {
       "@@||ssl.p.jwpcdn.com^",
       "@@||vjs.zencdn.net^",
       "@@||cdn.plyr.io^",
+      "@@||cdn.fluidplayer.com^",
       "@@||cdn.jsdelivr.net^",
       "@@||cloudfront.net/assets/\$~third-party",
+
+      // --- Video Ad Platforms, VAST / VMAP / Outstream / Instream Video Ad Servers ---
+      "||imasdk.googleapis.com/js/sdkloader/ima3.js",
+      "||primis.tech^",
+      "||live.primis.tech^",
+      "||connatix.com^",
+      "||cd.connatix.com^",
+      "||capi.connatix.com^",
+      "||anyclip.com^",
+      "||player.anyclip.com^",
+      "||playwire.com^",
+      "||config.playwire.com^",
+      "||cdn.playwire.com^",
+      "||aniview.com^",
+      "||player.aniview.com^",
+      "||gov.aniview.com^",
+      "||track1.aniview.com^",
+      "||vidazoo.com^",
+      "||static.vidazoo.com^",
+      "||springserve.com^",
+      "||vid.springserve.com^",
+      "||fwmrm.net^",
+      "||adm.fwmrm.net^",
+      "||spotxchange.com^",
+      "||spotx.tv^",
+      "||search.spotxchange.com^",
+      "||lkqd.net^",
+      "||ad.lkqd.net^",
+      "||v.lkqd.net^",
+      "||beachfront.com^",
+      "||reachms.bfmio.com^",
+      "||synacor.com^",
+      "||jwpltx.com^",
+      "||entitlements.jwplayer.com^",
+      "||prd.jwpltx.com^",
+      "||brid.tv^",
+      "||services.brid.tv^",
+      "||vidoomy.com^",
+      "||ads.vidoomy.com^",
+      "||vi.ai^",
+      "||s.vi-serve.com^",
+      "||instreamatic.com^",
+      "||selectmedia.asia^",
+      "||unrulymedia.com^",
+      "||video.unrulymedia.com^",
+      "|| innovating.video^",
+      "||adinplay.com^",
+      "||api.adinplay.com^",
 
       // --- Video / Streaming / Anime Site Ad Networks & Native Banner Networks ---
       "||exoclick.com^",
@@ -306,6 +387,7 @@ object FilterList {
       "||s.adspyglass.com^",
       "||asg.vidstream.pro^",
       "||asg.to^",
+      "||spolecznosci.net^",
       "||juicyads.com^",
       "||jads.co^",
       "||x.jads.co^",
@@ -384,7 +466,7 @@ object FilterList {
       "||html-load.com^",
       "||getadmiral.com^",
       "||includemodal.global.ssl.fastly.net^",
-      "|| Admiral.com^\$third-party",
+      "||admiral.com^\$third-party",
       "||blockadblock.com^",
       "||fuckadblock.com^",
       "||pagefair.com^",
@@ -415,7 +497,6 @@ object FilterList {
       "||adservice.google.co.jp^",
       "||adservice.google.com.au^",
       "||adservice.google.co.in^",
-      "||imasdk.googleapis.com/js/sdkloader/ima3.js",
       "||google-analytics.com^",
       "||ssl.google-analytics.com^",
       "||www.google-analytics.com^",
@@ -466,8 +547,6 @@ object FilterList {
       "||sovrn.com^",
       "||bidswitch.net^",
       "||x.bidswitch.net^",
-      "||spotxchange.com^",
-      "||spotx.tv^",
       "||stickyadstv.com^",
       "||ads.stickyadstv.com^",
       "||yieldmo.com^",
@@ -585,7 +664,6 @@ object FilterList {
       "||adsafeprotected.com^",
       "||pixel.adsafeprotected.com^",
       "||static.adsafeprotected.com^",
-      "||fwmrm.net^",
       "||imrworldwide.com^",
       "||secure-us.imrworldwide.com^",
       "||omtrdc.net^",
@@ -697,6 +775,7 @@ object FilterList {
       "/pagead/gadgets/",
       "/pagead/lvz?",
       "/pagead/interaction/",
+      "/gampad/ads?",
       "/gpt/pubads_impl_",
       "/tag/js/gpt.js",
       "/adserver/ad_logger",
@@ -739,15 +818,8 @@ object FilterList {
   val status: StateFlow<FilterStatus>
     get() = _status.asStateFlow()
 
-  /**
-   * Returns the current lock-free compiled filter set.
-   */
   fun currentRules(): CompiledFilterSet = compiledRulesRef.get()
 
-  /**
-   * Loads cached EasyList + EasyPrivacy rules from disk if available, and downloads
-   * fresh copies in the background if missing or older than 24 hours.
-   */
   fun initializeAndRefresh(context: Context) {
     val appContext = context.applicationContext
     scope.launch {
@@ -817,7 +889,7 @@ object FilterList {
         connectTimeout = 10_000
         readTimeout = 15_000
         instanceFollowRedirects = true
-        setRequestProperty("User-Agent", "Mozilla/5.0 (Android; AdBlockerModule/2.0)")
+        setRequestProperty("User-Agent", "Mozilla/5.0 (Android; AdBlockerModule/3.0)")
       }
       if (connection.responseCode == HttpURLConnection.HTTP_OK) {
         BufferedReader(InputStreamReader(connection.inputStream, Charsets.UTF_8)).use { reader ->
@@ -848,10 +920,6 @@ object FilterList {
     }
   }
 
-  /**
-   * Checks whether [host] or any of its parent domains is present in [domainSet]
-   * using fast O(labels) hash lookups.
-   */
   fun domainMatchesAny(host: String, domainSet: Set<String>): Boolean {
     if (domainSet.isEmpty()) return false
     var current = host.lowercase(Locale.ROOT).trimEnd('.')
@@ -864,10 +932,6 @@ object FilterList {
     return false
   }
 
-  /**
-   * Extracts the registrable domain (eTLD+1) of a host to accurately distinguish
-   * first-party resources from third-party trackers/ads.
-   */
   fun registrableDomain(host: String): String {
     val clean = host.lowercase(Locale.ROOT).trim().trimEnd('.')
     if (clean.isEmpty()) return ""
@@ -881,9 +945,6 @@ object FilterList {
     }
   }
 
-  /**
-   * Determines whether a request to [requestHost] from a page on [pageHost] is third-party.
-   */
   fun isThirdPartyRequest(requestHost: String, pageHost: String?): Boolean {
     if (pageHost.isNullOrBlank()) return false
     val reqBase = registrableDomain(requestHost)
@@ -892,9 +953,6 @@ object FilterList {
     return reqBase != pageBase
   }
 
-  /**
-   * Extracts a clean lowercase hostname from a URL string without throwing exceptions.
-   */
   fun extractHost(url: String?): String {
     if (url.isNullOrBlank()) return ""
     return try {
@@ -916,9 +974,6 @@ object FilterList {
     }
   }
 
-  /**
-   * Extracts the lowercase path and query portion of a URL.
-   */
   fun extractPathAndQuery(url: String): String {
     val schemeEnd = url.indexOf("://")
     val start = if (schemeEnd >= 0) schemeEnd + 3 else 0
@@ -932,9 +987,6 @@ object FilterList {
     }
   }
 
-  /**
-   * Extracts alphanumeric tokens (4+ chars) from a URL or pattern for fast O(1) hash indexing.
-   */
   fun extractTokens(text: String): List<String> {
     val result = ArrayList<String>(8)
     val sb = StringBuilder()
@@ -961,27 +1013,6 @@ object FilterList {
     return result
   }
 
-  // Bait classes commonly used by BlockAdBlock / FuckAdBlock to detect CSS hiding.
-  // We exclude these from raw CSS `display:none` injection and instead spoof their dimensions in JS.
-  private val BAIT_SELECTORS_TO_SKIP_IN_RAW_CSS =
-    hashSetOf(
-      ".adsbox",
-      ".ad-banner",
-      ".ad-placeholder",
-      ".text-ad",
-      ".banner-ad",
-      ".pub_300x250",
-      ".pub_300x250m",
-      ".pub_728x90",
-      "#adsbox",
-      "#ad-tester",
-      "#ad_tester",
-      ".adblock-test"
-    )
-
-  /**
-   * Compiles EasyList / EasyPrivacy lines into hash sets and token-indexed maps.
-   */
   fun compileRules(lines: Iterable<String>, isFull: Boolean): CompiledFilterSet {
     val pureBlockedDomains = HashSet<String>(32_768)
     val pureExceptionDomains = HashSet<String>(4_096)
@@ -1001,16 +1032,11 @@ object FilterList {
       val line = rawLine.trim()
       if (line.isEmpty() || line.startsWith("!") || line.startsWith("[")) continue
 
-      // 1. Handle cosmetic rules (##, #?#, #@#)
       val elemHideIdx = line.indexOf("##")
       if (elemHideIdx >= 0 && !line.contains("#@#") && !line.contains("#?#")) {
         val domainPart = line.substring(0, elemHideIdx).trim()
         val selector = line.substring(elemHideIdx + 2).trim()
-        if (
-          selector.isNotEmpty() &&
-            isValidCssSelector(selector) &&
-            !BAIT_SELECTORS_TO_SKIP_IN_RAW_CSS.contains(selector.lowercase(Locale.ROOT))
-        ) {
+        if (selector.isNotEmpty() && isValidCssSelector(selector)) {
           if (domainPart.isEmpty()) {
             if (genericCosmeticSet.size < MAX_COSMETIC_SELECTORS) {
               genericCosmeticSet.add(selector)
@@ -1036,7 +1062,6 @@ object FilterList {
         continue
       }
 
-      // 2. Network rules & exceptions (@@)
       var isException = false
       var body = line
       if (body.startsWith("@@")) {
@@ -1065,7 +1090,6 @@ object FilterList {
         continue
       }
 
-      // Case A: Plain hostname or ||domain^ rule
       if (patternPart.startsWith("||")) {
         val withoutAnchor = patternPart.substring(2).lowercase(Locale.ROOT)
         val caretOrSlashIdx = withoutAnchor.indexOfFirst { it == '^' || it == '/' || it == '*' }
@@ -1140,7 +1164,6 @@ object FilterList {
         continue
       }
 
-      // Case B: Substring/path pattern rule
       val cleanPattern =
         patternPart
           .removePrefix("|")

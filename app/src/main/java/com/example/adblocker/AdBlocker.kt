@@ -14,63 +14,18 @@ import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * Clean, self-contained, thread-safe Stealth Ad & Tracker Blocker module for Android `WebView`.
- * Includes Brave/uBlock-style Surrogate Scripts, VAST Video Ad Neutralization, and Anti-Adblock
- * Defuser Scriptlets so video players and websites never detect the ad blocker.
  *
- * =========================================================================================
- * HOW TO PLUG THIS MODULE INTO ANY ANDROID WEBVIEW IN ANOTHER APP
- * =========================================================================================
- * 1. Copy `AdBlocker.kt` and `FilterList.kt` into your Android project.
- * 2. Initialize once in `Application.onCreate()` or `Activity.onCreate()`:
- *    ```kotlin
- *    AdBlocker.init(context)
- *    ```
- * 3. Inside your `WebViewClient`:
- *    ```kotlin
- *    override fun shouldInterceptRequest(
- *        view: WebView,
- *        request: WebResourceRequest
- *    ): WebResourceResponse? {
- *        // Runs on a WebView background thread — fast, lock-free, returns stealth surrogates!
- *        return AdBlocker.interceptRequest(request, currentMainPageUrl)
- *            ?: super.shouldInterceptRequest(view, request)
- *    }
- *
- *    override fun shouldOverrideUrlLoading(
- *        view: WebView,
- *        request: WebResourceRequest
- *    ): Boolean {
- *        if (AdBlocker.shouldBlockNavigation(request, view.url, lastUserTapTimeMs)) {
- *            return true // Block ad redirect / pop-up navigation
- *        }
- *        return false // Let normal links open inside the same WebView
- *    }
- *
- *    override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
- *        if (AdBlocker.isEnabled()) {
- *            view.evaluateJavascript(AdBlocker.cosmeticScript(url), null)
- *        }
- *    }
- *
- *    override fun onPageFinished(view: WebView, url: String?) {
- *        if (AdBlocker.isEnabled()) {
- *            view.evaluateJavascript(AdBlocker.cosmeticScript(url), null)
- *        }
- *    }
- *    ```
- * 4. Inside your `WebChromeClient` (to block `window.open` ad pop-ups):
- *    ```kotlin
- *    override fun onCreateWindow(
- *        view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message?
- *    ): Boolean {
- *        val targetUrl = view?.hitTestResult?.extra
- *        if (AdBlocker.shouldAllowPopupToLoadInSameWebView(isUserGesture, targetUrl, view?.url) && !targetUrl.isNullOrBlank()) {
- *            view?.loadUrl(targetUrl)
- *        }
- *        return false
- *    }
- *    ```
- * =========================================================================================
+ * Features:
+ * 1. Network-level O(1) hash blocking with Stealth Surrogates (Google IMA, GPT, AdSense, Prebid,
+ *    ExoClick, BlockAdBlock/FuckAdBlock, and Empty VAST 3.0 XML for pre-roll/mid-roll video ads).
+ * 2. Complete White-Box & Empty-Slot Elimination: Blocked iframes return a zero-height transparent
+ *    self-collapsing HTML payload, and cosmetic JS collapses empty ad wrappers and blank banner
+ *    containers so no white boxes or empty gaps ever remain on screen.
+ * 3. Universal HTML5 Video Ad Neutralizer: Strips VAST/ad configs from FluidPlayer, JWPlayer, and
+ *    Video.js, and auto-fast-forwards/skips any in-stream video ads.
+ * 4. Anti-Adblock Bait Spoofing: Spoofs `offsetHeight`, `offsetWidth`, `clientHeight`, `clientWidth`,
+ *    `getBoundingClientRect`, `getComputedStyle`, and `fetch` bait probes so websites never detect
+ *    that their ad slots were collapsed.
  */
 object AdBlocker {
 
@@ -90,7 +45,7 @@ object AdBlocker {
   /** Live observable status of the EasyList + EasyPrivacy filter engine. */
   val filterStatus: StateFlow<FilterStatus> = FilterList.status
 
-  // Standard 43-byte 1x1 transparent GIF for blocked image requests so broken-image icons never appear
+  // Standard 43-byte 1x1 transparent GIF for blocked image requests
   private val TRANSPARENT_1X1_GIF: ByteArray =
     byteArrayOf(
       0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00,
@@ -104,8 +59,11 @@ object AdBlocker {
   private val EMPTY_VAST_XML_BYTES: ByteArray =
     """<?xml version="1.0" encoding="UTF-8"?><VAST version="3.0"></VAST>""".toByteArray(Charsets.UTF_8)
 
+  // Transparent, zero-height, self-collapsing HTML for blocked iframes so white boxes NEVER appear!
+  private val TRANSPARENT_COLLAPSING_IFRAME_HTML_BYTES: ByteArray =
+    """<!DOCTYPE html><html style="background:transparent!important;background-color:transparent!important;display:none!important;height:0!important;width:0!important;overflow:hidden!important;"><head><meta name="color-scheme" content="dark light"><style>html,body{background:transparent!important;background-color:transparent!important;margin:0!important;padding:0!important;height:0!important;width:0!important;display:none!important;overflow:hidden!important;border:0!important;}</style><script>try{if(window.frameElement){var f=window.frameElement;f.style.setProperty('display','none','important');f.style.setProperty('height','0px','important');f.style.setProperty('min-height','0px','important');var p=f.parentElement;if(p&&!p.querySelector('video')&&(p.innerText||'').trim().length<25){p.style.setProperty('display','none','important');p.style.setProperty('height','0px','important');p.style.setProperty('min-height','0px','important');p.style.setProperty('margin','0px','important');p.style.setProperty('padding','0px','important');}}}catch(e){}</script></head><body></body></html>""".toByteArray(Charsets.UTF_8)
+
   // Universal Ad-SDK & Anti-Adblock Surrogate JS returned for intercepted ad scripts.
-  // Prevents "Please disable your ad blocker" errors when sites check if ad scripts loaded globals.
   private val SURROGATE_AD_SDK_BYTES: ByteArray =
     """
     (function() {
@@ -290,7 +248,7 @@ object AdBlocker {
           };
         }
 
-        // BlockAdBlock / FuckAdBlock / ExoClick / AdSpyglass Surrogates
+        // BlockAdBlock / FuckAdBlock / ExoClick / AdSpyglass / Prebid Surrogates
         var FakeDetector = function() {
           this.check = function() { return false; };
           this.emitEvent = function() { return this; };
@@ -312,15 +270,11 @@ object AdBlocker {
         window.adsbyexoclick = window.adsbyexoclick || [];
         window.adsbyjuicy = window.adsbyjuicy || [];
         window.AdSpyglass = window.AdSpyglass || {};
+        window.pbjs = window.pbjs || { que: [], cmd: [], addAdUnits: noop, requestBids: function(o){ if(o && o.bidsBackHandler) try{ o.bidsBackHandler(); }catch(e){} }, setConfig: noop };
       } catch (e) {}
     })();
     """.trimIndent().toByteArray(Charsets.UTF_8)
 
-  /**
-   * Initializes the AdBlocker, restores the saved ON/OFF setting from SharedPreferences,
-   * activates bundled offline rules immediately, and starts the 24-hour background refresh
-   * for EasyList & EasyPrivacy.
-   */
   fun init(context: Context) {
     val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     val savedEnabled = prefs.getBoolean(KEY_ENABLED, true)
@@ -329,9 +283,6 @@ object AdBlocker {
     FilterList.initializeAndRefresh(context.applicationContext)
   }
 
-  /**
-   * Enables or disables ad blocking. Optionally persists the setting if [context] is passed.
-   */
   fun setEnabled(enabled: Boolean, context: Context? = null) {
     enabledFlag.set(enabled)
     _enabledFlow.value = enabled
@@ -344,39 +295,20 @@ object AdBlocker {
     }
   }
 
-  /**
-   * Returns whether the ad blocker is currently enabled.
-   */
   fun isEnabled(): Boolean = enabledFlag.get()
 
-  /**
-   * Returns the current page's blocked request count.
-   */
   fun getBlockedCount(): Int = pageBlockedCounter.get()
 
-  /**
-   * Resets the blocked request counter (call in `onPageStarted` for top-level navigation).
-   */
   fun resetBlockedCount() {
     pageBlockedCounter.set(0)
     _blockedCount.value = 0
   }
 
-  /**
-   * Increments the blocked request counter in a thread-safe manner.
-   */
   fun recordBlockedRequest() {
     val updated = pageBlockedCounter.incrementAndGet()
     _blockedCount.value = updated
   }
 
-  /**
-   * Core network matching method. Safe to call from any background thread.
-   *
-   * - Never blocks the main page itself (`isMainFrame == true`).
-   * - Checks `@@` exception rules first so whitelisted CDNs and first-party assets never break.
-   * - Performs O(labels) hash lookups on the hostname and O(tokens) lookups on the URL path.
-   */
   fun shouldBlock(
     url: String,
     isMainFrame: Boolean,
@@ -412,12 +344,10 @@ object AdBlocker {
     val urlLower = trimmed.lowercase(Locale.ROOT)
     val rules = FilterList.currentRules()
 
-    // 1. Check if the page domain itself is exempted via $document / $elemhide
     if (pageHost.isNotEmpty() && FilterList.domainMatchesAny(pageHost, rules.elemhideExceptionDomains)) {
       return false
     }
 
-    // 2. Check pure & conditional domain EXCEPTION rules (@@||domain^) by walking host labels
     if (matchesDomainHierarchy(
         host = reqHost,
         pureDomains = rules.pureExceptionDomains,
@@ -431,7 +361,6 @@ object AdBlocker {
       return false
     }
 
-    // 3. Check token-indexed URL pattern EXCEPTION rules
     val urlTokens = FilterList.extractTokens(pathAndQuery)
     for (i in 0 until urlTokens.size) {
       val bucket = rules.tokenExceptionPatterns[urlTokens[i]] ?: continue
@@ -442,13 +371,10 @@ object AdBlocker {
       }
     }
 
-    // 4. Protect first-party essential functional assets (HTML, CSS, Fonts, Media, Main scripts)
-    // unless the path explicitly matches a dedicated ad-serving or anti-adblock path.
     if (!isThirdParty && pageHost.isNotEmpty()) {
       return matchesExplicitFirstPartyAdPath(pathAndQuery)
     }
 
-    // 5. Fast O(labels) hash lookup for domain-anchored block rules (||domain^)
     if (matchesDomainHierarchy(
         host = reqHost,
         pureDomains = rules.pureBlockedDomains,
@@ -456,13 +382,12 @@ object AdBlocker {
         pathAndQuery = pathAndQuery,
         isThirdParty = isThirdParty,
         resourceType = resourceType,
-        pageHost = pageHost,
+      pageHost = pageHost,
       )
     ) {
       return true
     }
 
-    // 6. Fast O(tokens) lookup for URL substring/pattern block rules
     for (i in 0 until urlTokens.size) {
       val bucket = rules.tokenBlockedPatterns[urlTokens[i]] ?: continue
       for (j in 0 until bucket.size) {
@@ -475,10 +400,6 @@ object AdBlocker {
     return false
   }
 
-  /**
-   * Ready-to-use helper for `WebViewClient.shouldInterceptRequest`.
-   * Returns a stealth surrogate [WebResourceResponse] when blocked, or `null` to allow the request.
-   */
   fun interceptRequest(
     request: WebResourceRequest,
     currentPageUrl: String?,
@@ -490,7 +411,8 @@ object AdBlocker {
     val headers = request.requestHeaders
     val accept = headers?.get("Accept") ?: headers?.get("accept")
     val origin = headers?.get("Origin") ?: headers?.get("origin")
-    val resourceType = inferResourceType(url, isMainFrame = false, acceptHeader = accept)
+    val secFetchDest = headers?.get("Sec-Fetch-Dest") ?: headers?.get("sec-fetch-dest")
+    val resourceType = inferResourceType(url, isMainFrame = false, acceptHeader = accept, secFetchDest = secFetchDest)
 
     val effectivePageUrl =
       if (!currentPageUrl.isNullOrBlank()) {
@@ -506,10 +428,6 @@ object AdBlocker {
     return null
   }
 
-  /**
-   * Evaluates whether a navigation inside `WebViewClient.shouldOverrideUrlLoading`
-   * is an unwanted ad pop-up or forced redirect to an ad page.
-   */
   fun shouldBlockNavigation(
     request: WebResourceRequest,
     currentPageUrl: String?,
@@ -524,12 +442,11 @@ object AdBlocker {
     if (currentHost.isEmpty()) return false
 
     val isThirdParty = FilterList.isThirdPartyRequest(targetHost, currentHost)
-    if (!isThirdParty) return false // Always allow same-site navigation
+    if (!isThirdParty) return false
 
     val rules = FilterList.currentRules()
     val pathAndQuery = FilterList.extractPathAndQuery(targetUrl)
 
-    // 1. Always block navigation if the destination domain itself is a known ad/popup server
     val isAdDomain =
       matchesDomainHierarchy(
         host = targetHost,
@@ -545,7 +462,6 @@ object AdBlocker {
       return true
     }
 
-    // 2. Block suspicious affiliate / pop-under / AI generator promo redirects even on click
     val lowerUrl = targetUrl.lowercase(Locale.ROOT)
     if (
       lowerUrl.contains("clickid=") ||
@@ -565,7 +481,6 @@ object AdBlocker {
       return true
     }
 
-    // 3. Block unsolicited cross-domain main-frame redirects without user interaction
     val hasGesture = request.hasGesture()
     val recentUserTap = (System.currentTimeMillis() - lastUserTouchTimeMs) < 1_800L
     val isSearchEnginePage =
@@ -581,11 +496,6 @@ object AdBlocker {
     return false
   }
 
-  /**
-   * Call from `WebChromeClient.onCreateWindow` to handle `window.open` and `target="_blank"`.
-   * - Blocks automatic script pop-ups (`!isUserGesture`) and pop-ups targeting ad/affiliate domains.
-   * - Allows legitimate user-tapped same-domain links so the caller can open them in the same `WebView`.
-   */
   fun shouldAllowPopupToLoadInSameWebView(
     isUserGesture: Boolean,
     targetUrl: String?,
@@ -606,8 +516,6 @@ object AdBlocker {
         currentHost.contains("bing.com") ||
         currentHost.contains("duckduckgo.com")
 
-    // On non-search sites (like video streaming sites), pop-ups opening a third-party domain via
-    // window.open / target="_blank" when tapping the video player are almost always pop-under ads!
     if (isThirdParty && !isSearchEngine) {
       recordBlockedRequest()
       return false
@@ -628,17 +536,7 @@ object AdBlocker {
   }
 
   /**
-   * Returns the Brave/uBlock-style Stealth Anti-Adblock Defuser + Cosmetic Filtering script.
-   *
-   * 1. Spoofs `offsetHeight`, `offsetWidth`, `clientHeight`, `clientWidth`, `getBoundingClientRect`,
-   *    and `getComputedStyle` on bait elements (`.adsbox`, `.ad-banner`, `ins.adsbygoogle`, etc.)
-   *    so anti-adblock scripts think ads rendered with `300x250` dimensions!
-   * 2. Wraps `window.fetch` and `XMLHttpRequest` so network bait checks to ad servers resolve
-   *    cleanly with HTTP 200 OK instead of triggering `.catch()` anti-adblock modals.
-   * 3. Automatically dismisses/removes any "Please disable your ad blocker" overlay and restores
-   *    hidden/paused `<video>` or player `<iframe>` elements.
-   * 4. Collapses leftover ad slots, third-party affiliate promo banners (like "Generate ↗" ad cards),
-   *    and invisible click-hijack overlays.
+   * Returns the Ultimate Stealth Anti-Adblock + White-Box Eliminator + Video Ad Neutralizer script.
    */
   fun cosmeticScript(pageUrl: String? = null): String {
     if (!enabledFlag.get()) return "(function(){})();"
@@ -673,7 +571,7 @@ object AdBlocker {
     return """
       (function() {
         try {
-          // --- PART 1: STEALTH ANTI-ADBLOCK GLOBALS & BAIT SPOOFING (Runs once per document) ---
+          // --- PART 1: STEALTH ANTI-ADBLOCK GLOBALS, VIDEO PLAYER HOOKS & BAIT SPOOFING ---
           if (!window.__stealth_adblock_shield__) {
             window.__stealth_adblock_shield__ = true;
 
@@ -693,7 +591,6 @@ object AdBlocker {
               window.adsbygoogle.push = function() { return 1; };
             }
 
-            // Defuse window.open pop-unders while returning a truthy dummy window so scripts don't error
             window.open = function() {
               return {
                 closed: false,
@@ -705,8 +602,25 @@ object AdBlocker {
               };
             };
 
-            // Identify whether an element is an anti-adblock bait element
-            function isBaitElement(el) {
+            // Strip VAST / Ad options from FluidPlayer & JWPlayer before initialization
+            var origFluidPlayer = window.fluidPlayer;
+            Object.defineProperty(window, 'fluidPlayer', {
+              configurable: true,
+              get: function() {
+                if (!origFluidPlayer) return undefined;
+                return function(id, options) {
+                  if (options && options.vastOptions) {
+                    delete options.vastOptions;
+                  }
+                  return origFluidPlayer.apply(this, arguments);
+                };
+              },
+              set: function(fn) {
+                origFluidPlayer = fn;
+              }
+            });
+
+            function isBaitOrAdElement(el) {
               if (!el || !el.tagName) return false;
               var cls = (typeof el.className === 'string' ? el.className : '') + ' ' + (el.id || '');
               if (!cls) return false;
@@ -716,9 +630,13 @@ object AdBlocker {
                 lower.indexOf('ad-banner') !== -1 ||
                 lower.indexOf('ad_banner') !== -1 ||
                 lower.indexOf('ad-placeholder') !== -1 ||
+                lower.indexOf('ad-slot') !== -1 ||
+                lower.indexOf('ad-unit') !== -1 ||
+                lower.indexOf('ad-container') !== -1 ||
+                lower.indexOf('ad-wrapper') !== -1 ||
                 lower.indexOf('ad-tester') !== -1 ||
                 lower.indexOf('ad_tester') !== -1 ||
-                lower.indexOf('adblock-test') !== -1 ||
+                lower.indexOf('adblock') !== -1 ||
                 lower.indexOf('pub_300x250') !== -1 ||
                 lower.indexOf('text-ad') !== -1 ||
                 lower.indexOf('banner-ad') !== -1 ||
@@ -726,7 +644,7 @@ object AdBlocker {
               );
             }
 
-            // Spoof offsetHeight / offsetWidth / clientHeight / clientWidth for bait elements
+            // Spoof offsetHeight / offsetWidth / clientHeight / clientWidth so CSS hiding is undetectable!
             var origOffsetHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight');
             var origOffsetWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth');
             var origClientHeight = Object.getOwnPropertyDescriptor(Element.prototype, 'clientHeight');
@@ -736,8 +654,9 @@ object AdBlocker {
               Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
                 configurable: true,
                 get: function() {
-                  if (isBaitElement(this)) return 250;
-                  return origOffsetHeight.get.call(this);
+                  var h = origOffsetHeight.get.call(this);
+                  if (h === 0 && isBaitOrAdElement(this)) return 250;
+                  return h;
                 }
               });
             }
@@ -745,8 +664,9 @@ object AdBlocker {
               Object.defineProperty(HTMLElement.prototype, 'offsetWidth', {
                 configurable: true,
                 get: function() {
-                  if (isBaitElement(this)) return 300;
-                  return origOffsetWidth.get.call(this);
+                  var w = origOffsetWidth.get.call(this);
+                  if (w === 0 && isBaitOrAdElement(this)) return 300;
+                  return w;
                 }
               });
             }
@@ -754,8 +674,9 @@ object AdBlocker {
               Object.defineProperty(Element.prototype, 'clientHeight', {
                 configurable: true,
                 get: function() {
-                  if (isBaitElement(this)) return 250;
-                  return origClientHeight.get.call(this);
+                  var h = origClientHeight.get.call(this);
+                  if (h === 0 && isBaitOrAdElement(this)) return 250;
+                  return h;
                 }
               });
             }
@@ -763,8 +684,9 @@ object AdBlocker {
               Object.defineProperty(Element.prototype, 'clientWidth', {
                 configurable: true,
                 get: function() {
-                  if (isBaitElement(this)) return 300;
-                  return origClientWidth.get.call(this);
+                  var w = origClientWidth.get.call(this);
+                  if (w === 0 && isBaitOrAdElement(this)) return 300;
+                  return w;
                 }
               });
             }
@@ -773,7 +695,7 @@ object AdBlocker {
             if (origGetBCR) {
               Element.prototype.getBoundingClientRect = function() {
                 var rect = origGetBCR.call(this);
-                if (isBaitElement(this) && (rect.height === 0 || rect.width === 0)) {
+                if (isBaitOrAdElement(this) && (rect.height === 0 || rect.width === 0)) {
                   return {
                     top: rect.top || 10,
                     left: rect.left || 10,
@@ -794,7 +716,7 @@ object AdBlocker {
             if (origGetComputedStyle) {
               window.getComputedStyle = function(el, pseudo) {
                 var style = origGetComputedStyle.call(window, el, pseudo);
-                if (el && isBaitElement(el)) {
+                if (el && isBaitOrAdElement(el)) {
                   return new Proxy(style, {
                     get: function(target, prop) {
                       if (prop === 'display') return 'block';
@@ -821,7 +743,6 @@ object AdBlocker {
               };
             }
 
-            // Shield fetch() from rejecting when a page probes an ad script or bait URL
             function isAdBaitUrl(u) {
               if (!u || typeof u !== 'string') return false;
               var l = u.toLowerCase();
@@ -855,12 +776,16 @@ object AdBlocker {
               window.fetch = function(input, init) {
                 var urlStr = typeof input === 'string' ? input : (input && input.url ? input.url : '');
                 if (isAdBaitUrl(urlStr)) {
+                  var isXml = urlStr.toLowerCase().indexOf('vast') !== -1 || urlStr.toLowerCase().indexOf('.xml') !== -1;
                   return Promise.resolve(
-                    new Response('window.canRunAds=true;', {
-                      status: 200,
-                      statusText: 'OK',
-                      headers: { 'Content-Type': 'application/javascript' }
-                    })
+                    new Response(
+                      isXml ? '<?xml version="1.0" encoding="UTF-8"?><VAST version="3.0"></VAST>' : 'window.canRunAds=true;',
+                      {
+                        status: 200,
+                        statusText: 'OK',
+                        headers: { 'Content-Type': isXml ? 'application/xml' : 'application/javascript' }
+                      }
+                    )
                   );
                 }
                 return origFetch.apply(this, arguments).catch(function(err) {
@@ -873,35 +798,184 @@ object AdBlocker {
             }
           }
 
-          // --- PART 2: SAFE COSMETIC CSS INJECTION (Uses random style ID so scripts can't detect it) ---
+          // --- PART 2: COSMETIC CSS INJECTION (Hides all ad slots with zero height & transparent bg) ---
           var styleAttr = 'data-v-shield-style';
-          if (document.head && !document.head.querySelector('style[' + styleAttr + ']')) {
+          var rootNode = document.head || document.documentElement;
+          if (rootNode && !rootNode.querySelector('style[' + styleAttr + ']')) {
             var style = document.createElement('style');
             style.setAttribute(styleAttr, '1');
             style.type = 'text/css';
-            style.appendChild(document.createTextNode('$cssRuleString { display: none !important; visibility: hidden !important; height: 0 !important; min-height: 0 !important; max-height: 0 !important; margin: 0 !important; padding: 0 !important; overflow: hidden !important; pointer-events: none !important; }'));
-            document.head.appendChild(style);
+            style.appendChild(document.createTextNode('$cssRuleString { display: none !important; visibility: hidden !important; opacity: 0 !important; height: 0px !important; min-height: 0px !important; max-height: 0px !important; margin: 0px !important; padding: 0px !important; border: none !important; background: transparent !important; overflow: hidden !important; pointer-events: none !important; } iframe[src="about:blank"], iframe[src=""] { background: transparent !important; }'));
+            rootNode.appendChild(style);
           }
 
-          // --- PART 3: ACTIVE ANTI-ADBLOCK OVERLAY KILLER & NATIVE PROMO CLEANER ---
-          function cleanAntiAdblockAndPromos() {
-            // 1. Detect and neutralize "Please disable your ad blocker" warning overlays
-            var candidates = document.querySelectorAll('div, section, aside, dialog');
-            for (var i = 0; i < candidates.length; i++) {
-              var el = candidates[i];
+          // --- PART 3: WHITE-BOX COLLAPSER, VIDEO AD SKIPPER & ANTI-ADBLOCK OVERLAY REMOVER ---
+          function isLegitVideoIframe(iframe) {
+            if (!iframe) return false;
+            var src = (iframe.getAttribute('src') || iframe.getAttribute('data-src') || '').toLowerCase();
+            if (!src || src === 'about:blank') return false;
+            var allowFs = iframe.hasAttribute('allowfullscreen') || iframe.hasAttribute('webkitallowfullscreen') || (iframe.getAttribute('allow') || '').indexOf('fullscreen') !== -1;
+            var isAdSrc =
+              src.indexOf('doubleclick') !== -1 ||
+              src.indexOf('googlesyndication') !== -1 ||
+              src.indexOf('exoclick') !== -1 ||
+              src.indexOf('exosrv') !== -1 ||
+              src.indexOf('magsrv') !== -1 ||
+              src.indexOf('realsrv') !== -1 ||
+              src.indexOf('pemsrv') !== -1 ||
+              src.indexOf('tsyndicate') !== -1 ||
+              src.indexOf('juicyads') !== -1 ||
+              src.indexOf('jads.co') !== -1 ||
+              src.indexOf('trafficjunky') !== -1 ||
+              src.indexOf('adspyglass') !== -1 ||
+              src.indexOf('a-ads.com') !== -1 ||
+              src.indexOf('bidgear') !== -1 ||
+              src.indexOf('adsterra') !== -1 ||
+              src.indexOf('propellerads') !== -1 ||
+              src.indexOf('/ads/') !== -1 ||
+              src.indexOf('banner') !== -1;
+            if (isAdSrc) return false;
+            var rect = iframe.getBoundingClientRect();
+            if (allowFs && rect.height >= 180) return true;
+            if (
+              src.indexOf('embed') !== -1 ||
+              src.indexOf('player') !== -1 ||
+              src.indexOf('video') !== -1 ||
+              src.indexOf('stream') !== -1 ||
+              src.indexOf('youtube.com') !== -1 ||
+              src.indexOf('vimeo.com') !== -1 ||
+              src.indexOf('dailymotion.com') !== -1
+            ) {
+              return true;
+            }
+            return false;
+          }
+
+          function collapseElementAndEmptyWrapper(el) {
+            if (!el || el === document.body || el === document.documentElement) return;
+            if (el.querySelector && (el.querySelector('video') || isLegitVideoIframe(el))) return;
+            el.style.setProperty('display', 'none', 'important');
+            el.style.setProperty('height', '0px', 'important');
+            el.style.setProperty('min-height', '0px', 'important');
+            el.style.setProperty('margin', '0px', 'important');
+            el.style.setProperty('padding', '0px', 'important');
+            el.style.setProperty('background', 'transparent', 'important');
+
+            // Walk up 1-3 parent wrapper levels if they only existed to hold this ad box
+            var parent = el.parentElement;
+            var depth = 0;
+            while (
+              parent &&
+              depth < 3 &&
+              parent !== document.body &&
+              parent !== document.documentElement &&
+              parent.tagName !== 'MAIN' &&
+              parent.tagName !== 'ARTICLE' &&
+              !parent.querySelector('video')
+            ) {
+              var hasLegitVideo = false;
+              var childIframes = parent.querySelectorAll('iframe');
+              for (var c = 0; c < childIframes.length; c++) {
+                if (isLegitVideoIframe(childIframes[c])) {
+                  hasLegitVideo = true;
+                  break;
+                }
+              }
+              if (hasLegitVideo) break;
+
+              var textLen = (parent.innerText || '').trim().length;
+              if (textLen < 25 && parent.children.length <= 3) {
+                parent.style.setProperty('display', 'none', 'important');
+                parent.style.setProperty('height', '0px', 'important');
+                parent.style.setProperty('min-height', '0px', 'important');
+                parent.style.setProperty('margin', '0px', 'important');
+                parent.style.setProperty('padding', '0px', 'important');
+                parent.style.setProperty('background', 'transparent', 'important');
+                parent = parent.parentElement;
+                depth++;
+              } else {
+                break;
+              }
+            }
+          }
+
+          function cleanPageAdsAndWhiteBoxes() {
+            // 1. Collapse known ad slots & their parent wrapper boxes (eliminating white boxes!)
+            var adNodes = document.querySelectorAll(
+              'ins.adsbygoogle, .adsbygoogle, ins[class*="eas"], ins[data-zoneid], div[data-zone], [id^="div-gpt-ad"], [id^="google_ads_iframe"], [data-ad-slot], [data-ad-client], [data-google-query-id], .ad-banner, .ad-container, .ad-wrapper, .ad-slot, .ad-unit, .ad-placeholder, .adbox, .adslot, .adsbox, .advert, .advertisement'
+            );
+            for (var a = 0; a < adNodes.length; a++) {
+              collapseElementAndEmptyWrapper(adNodes[a]);
+            }
+
+            // 2. Collapse all ad iframes & blank/white placeholder iframes
+            var iframes = document.querySelectorAll('iframe');
+            for (var f = 0; f < iframes.length; f++) {
+              var ifr = iframes[f];
+              if (isLegitVideoIframe(ifr)) continue;
+              var src = (ifr.getAttribute('src') || '').trim().toLowerCase();
+              var rect = ifr.getBoundingClientRect();
+              var isBannerHeight = rect.height > 0 && rect.height <= 320;
+              if (
+                src === '' ||
+                src === 'about:blank' ||
+                src.indexOf('javascript:') === 0 ||
+                isBannerHeight
+              ) {
+                collapseElementAndEmptyWrapper(ifr);
+              }
+            }
+
+            // 3. Detect & collapse leftover empty white rounded boxes (banner wrappers whose ad failed/blocked)
+            var boxes = document.querySelectorAll('div, section, aside, ins');
+            for (var b = 0; b < boxes.length; b++) {
+              var box = boxes[b];
+              if (box.children.length > 4) continue;
+              if (box.querySelector('video, canvas, svg, input, button, nav, h1, h2, h3')) continue;
+              var txt = (box.innerText || '').trim();
+              if (txt.length > 20) continue;
+
+              var r = box.getBoundingClientRect();
+              if (r.width >= 200 && r.height >= 45 && r.height <= 320) {
+                var cs = window.getComputedStyle(box);
+                var bg = (cs.backgroundColor || '').replace(/\s+/g, '');
+                var clsAndId = ((typeof box.className === 'string' ? box.className : '') + ' ' + (box.id || '')).toLowerCase();
+                var isWhiteBg =
+                  bg === 'rgb(255,255,255)' ||
+                  bg === 'rgba(255,255,255,1)' ||
+                  bg === 'rgb(248,250,252)' ||
+                  bg === 'rgb(241,245,249)';
+                var hasOnlyEmptyOrBlockedChildren =
+                  box.children.length === 0 ||
+                  box.querySelector('iframe, ins, script');
+
+                if (
+                  (isWhiteBg && hasOnlyEmptyOrBlockedChildren && txt.length === 0) ||
+                  clsAndId.indexOf('banner') !== -1 ||
+                  clsAndId.indexOf('ad-') !== -1 ||
+                  clsAndId.indexOf('ads-') !== -1 ||
+                  clsAndId.indexOf('sponsor') !== -1
+                ) {
+                  collapseElementAndEmptyWrapper(box);
+                }
+              }
+            }
+
+            // 4. Detect and remove "Please disable your ad blocker" overlays
+            for (var i = 0; i < boxes.length; i++) {
+              var el = boxes[i];
               if (el.children.length > 12) continue;
-              var txt = (el.innerText || '').trim().toLowerCase();
-              if (!txt || txt.length > 350) continue;
+              var t = (el.innerText || '').trim().toLowerCase();
+              if (!t || t.length > 350) continue;
 
               if (
-                txt.indexOf('please disable your ad blocker') !== -1 ||
-                txt.indexOf('disable your ad blocker for this site') !== -1 ||
-                txt.indexOf('advertising supports free playback') !== -1 ||
-                txt.indexOf('adblock detected') !== -1 ||
-                txt.indexOf('ad blocker detected') !== -1 ||
-                txt.indexOf('turn off your ad blocker') !== -1
+                t.indexOf('please disable your ad blocker') !== -1 ||
+                t.indexOf('disable your ad blocker for this site') !== -1 ||
+                t.indexOf('advertising supports free playback') !== -1 ||
+                t.indexOf('adblock detected') !== -1 ||
+                t.indexOf('ad blocker detected') !== -1 ||
+                t.indexOf('turn off your ad blocker') !== -1
               ) {
-                // Walk up to the overlay container (but never remove the main player wrapper or body)
                 var target = el;
                 while (
                   target.parentElement &&
@@ -917,34 +991,28 @@ object AdBlocker {
                 target.style.setProperty('pointer-events', 'none', 'important');
                 target.style.setProperty('z-index', '-9999', 'important');
 
-                // Restore any blurred or hidden video / iframe inside the player container
-                var videos = document.querySelectorAll('video, iframe');
-                for (var v = 0; v < videos.length; v++) {
-                  var media = videos[v];
-                  var mSrc = (media.src || '').toLowerCase();
-                  if (mSrc.indexOf('doubleclick') === -1 && mSrc.indexOf('exoclick') === -1 && mSrc.indexOf('magsrv') === -1) {
-                    media.style.removeProperty('display');
-                    media.style.removeProperty('visibility');
-                    media.style.setProperty('filter', 'none', 'important');
-                    media.style.setProperty('opacity', '1', 'important');
+                var mediaNodes = document.querySelectorAll('video, iframe');
+                for (var v = 0; v < mediaNodes.length; v++) {
+                  var m = mediaNodes[v];
+                  if (m.tagName === 'VIDEO' || isLegitVideoIframe(m)) {
+                    m.style.removeProperty('display');
+                    m.style.removeProperty('visibility');
+                    m.style.setProperty('filter', 'none', 'important');
+                    m.style.setProperty('opacity', '1', 'important');
                   }
-                }
-                if (document.body) {
-                  document.body.style.removeProperty('overflow');
-                  document.body.style.removeProperty('position');
                 }
               }
             }
 
-            // 2. Remove in-page affiliate promo banners (e.g., "AI Image Generator ... Generate ↗" cards & third-party ad cards)
-            var links = document.querySelectorAll('a[target="_blank"], div[onclick], section, aside, ins');
+            // 5. Remove in-page affiliate promo banners (e.g. "AI Image Generator ... Generate ↗")
+            var links = document.querySelectorAll('a[target="_blank"], div[onclick]');
             for (var j = 0; j < links.length; j++) {
               var node = links[j];
               var href = (node.getAttribute && (node.getAttribute('href') || node.getAttribute('data-url') || '')) || '';
               var lowerHref = href.toLowerCase();
               var nodeText = (node.innerText || '').trim().toLowerCase();
 
-              var isAffiliateBanner =
+              if (
                 lowerHref.indexOf('exoclick') !== -1 ||
                 lowerHref.indexOf('tsyndicate') !== -1 ||
                 lowerHref.indexOf('magsrv') !== -1 ||
@@ -956,48 +1024,38 @@ object AdBlocker {
                 lowerHref.indexOf('clickid=') !== -1 ||
                 lowerHref.indexOf('aff_id=') !== -1 ||
                 lowerHref.indexOf('zoneid=') !== -1 ||
-                lowerHref.indexOf('utm_medium=banner') !== -1 ||
-                (nodeText.indexOf('ai image generator') !== -1 && nodeText.indexOf('generate') !== -1) ||
-                (nodeText.indexOf('sponsored') !== -1 && nodeText.length < 180);
-
-              if (isAffiliateBanner) {
-                var card = node;
-                if (
-                  card.parentElement &&
-                  card.parentElement !== document.body &&
-                  (card.parentElement.innerText || '').trim().length < 220 &&
-                  !card.parentElement.querySelector('video')
-                ) {
-                  card = card.parentElement;
-                }
-                card.style.setProperty('display', 'none', 'important');
+                (nodeText.indexOf('ai image generator') !== -1 && nodeText.indexOf('generate') !== -1)
+              ) {
+                collapseElementAndEmptyWrapper(node);
               }
             }
 
-            // 3. Remove invisible high-z-index click-hijack overlays placed over video players
-            var divs = document.querySelectorAll('div, a');
-            for (var k = 0; k < divs.length; k++) {
-              var d = divs[k];
-              var st = d.style;
-              if (!st) continue;
-              var z = parseInt(st.zIndex || '0', 10);
-              if (z > 900 && d.children.length === 0 && (d.innerText || '').trim() === '') {
-                var rect = d.getBoundingClientRect();
-                if (rect.width > 200 && rect.height > 150) {
-                  d.style.setProperty('display', 'none', 'important');
-                  d.style.setProperty('pointer-events', 'none', 'important');
-                }
-              }
-            }
-
-            // 4. Auto-click video ad skip buttons if any player renders an in-stream skip control
-            var skipBtns = document.querySelectorAll('.jw-skip, .vjs-skip-button, .videoAdUiSkipButton, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, [class*="skip-ad"], [id*="skip-ad"]');
+            // 6. Universal Video Pre-roll / Mid-roll Ad Skipper (YouTube, JWPlayer, VideoJS, FluidPlayer)
+            var skipBtns = document.querySelectorAll(
+              '.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button, .jw-skip, .vjs-skip-button, .videoAdUiSkipButton, .fluid_ad_skip, [class*="skip-ad"], [class*="skip_ad"], [id*="skip-ad"]'
+            );
             for (var s = 0; s < skipBtns.length; s++) {
               try { skipBtns[s].click(); } catch (e) {}
             }
+
+            var adPlayerContainers = document.querySelectorAll(
+              '.ad-showing, .ad-interrupting, .jw-flag-ads, .vjs-ad-playing, .fluid_ad_playing, .ima-ad-container'
+            );
+            for (var p = 0; p < adPlayerContainers.length; p++) {
+              var adVid = adPlayerContainers[p].querySelector('video');
+              if (adVid) {
+                try {
+                  adVid.muted = true;
+                  adVid.playbackRate = 16.0;
+                  if (isFinite(adVid.duration) && adVid.duration > 0 && adVid.duration < 180) {
+                    adVid.currentTime = adVid.duration;
+                  }
+                } catch (e) {}
+              }
+            }
           }
 
-          cleanAntiAdblockAndPromos();
+          cleanPageAdsAndWhiteBoxes();
 
           if (!window.__adblocker_observer_installed__ && typeof MutationObserver !== 'undefined') {
             window.__adblocker_observer_installed__ = true;
@@ -1007,8 +1065,8 @@ object AdBlocker {
                 scheduled = true;
                 setTimeout(function() {
                   scheduled = false;
-                  cleanAntiAdblockAndPromos();
-                }, 180);
+                  cleanPageAdsAndWhiteBoxes();
+                }, 150);
               }
             });
             observer.observe(document.documentElement, { childList: true, subtree: true });
@@ -1018,11 +1076,6 @@ object AdBlocker {
     """.trimIndent()
   }
 
-  /**
-   * Normalizes user input from an address/search bar into a loadable URL.
-   * - If the user types a URL or domain (e.g. `theverge.com`, `https://cnn.com`), opens it directly.
-   * - Otherwise searches with Google (`https://www.google.com/search?q=...`).
-   */
   fun resolveInputToUrl(input: String): String {
     val trimmed = input.trim()
     if (trimmed.isEmpty()) return "https://www.google.com"
@@ -1090,15 +1143,24 @@ object AdBlocker {
     url: String,
     isMainFrame: Boolean,
     acceptHeader: String?,
+    secFetchDest: String? = null,
   ): ResourceType {
     if (isMainFrame) return ResourceType.OTHER
+    val lowerDest = secFetchDest?.lowercase(Locale.ROOT) ?: ""
+    if (lowerDest == "iframe" || lowerDest == "frame" || lowerDest == "subdocument") {
+      return ResourceType.SUBDOCUMENT
+    }
+    if (lowerDest == "script") return ResourceType.SCRIPT
+    if (lowerDest == "style") return ResourceType.STYLESHEET
+    if (lowerDest == "image") return ResourceType.IMAGE
+
     val lowerAccept = acceptHeader?.lowercase(Locale.ROOT) ?: ""
-    if (lowerAccept.contains("text/css")) return ResourceType.STYLESHEET
-    if (lowerAccept.contains("image/")) return ResourceType.IMAGE
-    if (lowerAccept.contains("script") || lowerAccept.contains("javascript")) return ResourceType.SCRIPT
     if (lowerAccept.contains("text/html") || lowerAccept.contains("application/xhtml")) {
       return ResourceType.SUBDOCUMENT
     }
+    if (lowerAccept.contains("text/css")) return ResourceType.STYLESHEET
+    if (lowerAccept.contains("image/")) return ResourceType.IMAGE
+    if (lowerAccept.contains("script") || lowerAccept.contains("javascript")) return ResourceType.SCRIPT
 
     val path = FilterList.extractPathAndQuery(url).substringBefore('?')
     return when {
@@ -1119,10 +1181,6 @@ object AdBlocker {
     }
   }
 
-  /**
-   * Returns a stealth surrogate response tailored to the request type so sites and video players
-   * never detect that the ad request was blocked.
-   */
   private fun createSurrogateResponse(
     url: String,
     resourceType: ResourceType,
@@ -1142,7 +1200,6 @@ object AdBlocker {
     val lowerUrl = url.lowercase(Locale.ROOT)
     val lowerAccept = acceptHeader?.lowercase(Locale.ROOT) ?: ""
 
-    // 1. VAST / VMAP Video Ad XML Request -> Return valid empty VAST 3.0 XML so video plays immediately
     if (
       lowerUrl.contains("vast") ||
         lowerUrl.contains("vmap") ||
@@ -1162,7 +1219,6 @@ object AdBlocker {
       )
     }
 
-    // 2. JSON Ad Config / Bid Request -> Return valid empty JSON object `{}` so response.json() succeeds
     if (
       lowerAccept.contains("application/json") ||
         lowerUrl.endsWith(".json") ||
@@ -1213,7 +1269,7 @@ object AdBlocker {
           200,
           "OK",
           headers,
-          ByteArrayInputStream("<!DOCTYPE html><html><head></head><body></body></html>".toByteArray(Charsets.UTF_8)),
+          ByteArrayInputStream(TRANSPARENT_COLLAPSING_IFRAME_HTML_BYTES),
         )
       else ->
         WebResourceResponse(

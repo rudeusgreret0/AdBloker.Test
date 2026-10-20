@@ -106,6 +106,7 @@ import java.util.concurrent.atomic.AtomicReference
 class MainActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    cleanUnsignedWebViewVariationsSeed()
     AdBlocker.init(applicationContext)
     enableEdgeToEdge()
     setContent {
@@ -113,6 +114,20 @@ class MainActivity : ComponentActivity() {
         AdBlockTestScreen()
       }
     }
+  }
+
+  private fun cleanUnsignedWebViewVariationsSeed() {
+    try {
+      val webViewDir = java.io.File(applicationInfo.dataDir, "app_webview")
+      if (webViewDir.exists()) {
+        listOf("variations_seed", "variations_seed_new", "variations_stamp").forEach { fileName ->
+          val file = java.io.File(webViewDir, fileName)
+          if (file.exists()) {
+            file.delete()
+          }
+        }
+      }
+    } catch (_: Throwable) {}
   }
 }
 
