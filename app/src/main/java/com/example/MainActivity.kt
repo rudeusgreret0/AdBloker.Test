@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.os.Bundle
 import android.os.Message
 import android.view.MotionEvent
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
@@ -13,13 +14,23 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -27,6 +38,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -45,7 +57,9 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Shield
@@ -73,6 +87,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
@@ -91,7 +106,6 @@ import java.util.concurrent.atomic.AtomicReference
 class MainActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
-    // Initialize the self-contained AdBlocker module (restores ON/OFF state & syncs EasyList/EasyPrivacy)
     AdBlocker.init(applicationContext)
     enableEdgeToEdge()
     setContent {
@@ -128,7 +142,10 @@ fun AdBlockTestScreen() {
   var loadProgress by remember { mutableIntStateOf(100) }
   var lastUserTouchTimeMs by remember { mutableLongStateOf(0L) }
 
-  // Atomic reference so background WebViewClient threads always see the latest main-frame URL
+  // Fullscreen custom view state for HTML5 video players
+  var customFullscreenView by remember { mutableStateOf<View?>(null) }
+  var customViewCallback by remember { mutableStateOf<WebChromeClient.CustomViewCallback?>(null) }
+
   val currentMainUrlRef = remember { AtomicReference("https://www.google.com") }
   var webViewInstance by remember { mutableStateOf<WebView?>(null) }
 
@@ -142,15 +159,47 @@ fun AdBlockTestScreen() {
     webViewInstance?.loadUrl(targetUrl)
   }
 
-  // Hardware/gesture Back button navigates back in WebView history
-  BackHandler(enabled = canGoBack) {
-    webViewInstance?.let { wv ->
-      if (wv.canGoBack()) {
-        wv.goBack()
-        canGoBack = wv.canGoBack()
+  // Hardware/gesture Back button exits fullscreen video first, or navigates back in WebView history
+  BackHandler(enabled = customFullscreenView != null || canGoBack) {
+    if (customFullscreenView != null) {
+      customViewCallback?.onCustomViewHidden()
+      customFullscreenView = null
+      customViewCallback = null
+    } else {
+      webViewInstance?.let { wv ->
+        if (wv.canGoBack()) {
+          wv.goBack()
+          canGoBack = wv.canGoBack()
+        }
       }
     }
   }
+
+  val shieldCardBg by animateColorAsState(
+    targetValue = if (isAdBlockEnabled) {
+      MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+    } else {
+      MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)
+    },
+    animationSpec = tween(durationMillis = 260),
+    label = "shieldCardBg"
+  )
+
+  val shieldBorderColor by animateColorAsState(
+    targetValue = if (isAdBlockEnabled) {
+      MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)
+    } else {
+      MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+    },
+    animationSpec = tween(durationMillis = 260),
+    label = "shieldBorderColor"
+  )
+
+  val shieldIconScale by animateFloatAsState(
+    targetValue = if (isAdBlockEnabled) 1.0f else 0.92f,
+    animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+    label = "shieldIconScale"
+  )
 
   Scaffold(
     modifier = Modifier.fillMaxSize(),
@@ -162,7 +211,7 @@ fun AdBlockTestScreen() {
         .fillMaxSize()
         .padding(innerPadding)
     ) {
-      // Top Control Surface: Search/Address Bar + Ad Block ON/OFF Switch + Live Blocked Counter
+      // Compact, refined Top Control Surface
       Surface(
         color = MaterialTheme.colorScheme.surface,
         tonalElevation = 1.dp,
@@ -171,14 +220,14 @@ fun AdBlockTestScreen() {
         Column(
           modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-          verticalArrangement = Arrangement.spacedBy(10.dp)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+          verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-          // Row 1: Back button + Address/Search bar + Search button
+          // Row 1: Back button + Address/Search bar + Reload + Search button
           Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
           ) {
             IconButton(
               onClick = {
@@ -191,7 +240,7 @@ fun AdBlockTestScreen() {
               },
               enabled = canGoBack,
               modifier = Modifier
-                .size(48.dp)
+                .size(44.dp)
                 .testTag("back_button")
             ) {
               Icon(
@@ -200,31 +249,39 @@ fun AdBlockTestScreen() {
                 tint = if (canGoBack) {
                   MaterialTheme.colorScheme.onSurface
                 } else {
-                  MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+                  MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
                 }
               )
             }
 
-            // Clean rounded address / search field
+            // Sleek capsule address / search bar
             Row(
               modifier = Modifier
                 .weight(1f)
-                .height(48.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .height(44.dp)
+                .clip(RoundedCornerShape(22.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.85f))
                 .border(
                   width = 1.dp,
-                  color = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
-                  shape = RoundedCornerShape(14.dp)
+                  color = MaterialTheme.colorScheme.outline.copy(alpha = 0.55f),
+                  shape = RoundedCornerShape(22.dp)
                 )
                 .padding(horizontal = 12.dp),
               verticalAlignment = Alignment.CenterVertically
             ) {
               Icon(
-                imageVector = Icons.Outlined.Search,
+                imageVector = if (addressInput.startsWith("https://")) {
+                  Icons.Outlined.Lock
+                } else {
+                  Icons.Outlined.Search
+                },
                 contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(18.dp)
+                tint = if (addressInput.startsWith("https://")) {
+                  MaterialTheme.colorScheme.primary
+                } else {
+                  MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                modifier = Modifier.size(16.dp)
               )
               Spacer(modifier = Modifier.width(8.dp))
               Box(
@@ -235,7 +292,7 @@ fun AdBlockTestScreen() {
                   Text(
                     text = stringResource(R.string.address_bar_hint),
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                   )
@@ -266,14 +323,14 @@ fun AdBlockTestScreen() {
                 IconButton(
                   onClick = { addressInput = "" },
                   modifier = Modifier
-                    .size(36.dp)
+                    .size(32.dp)
                     .testTag("clear_address_button")
                 ) {
                   Icon(
                     imageVector = Icons.Outlined.Close,
                     contentDescription = stringResource(R.string.clear_input),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(16.dp)
+                    modifier = Modifier.size(15.dp)
                   )
                 }
               }
@@ -281,17 +338,14 @@ fun AdBlockTestScreen() {
 
             Button(
               onClick = { loadInputOrSearch(addressInput) },
-              shape = RoundedCornerShape(14.dp),
+              shape = RoundedCornerShape(22.dp),
               colors = ButtonDefaults.buttonColors(
                 containerColor = MaterialTheme.colorScheme.primary,
                 contentColor = MaterialTheme.colorScheme.onPrimary
               ),
-              contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                horizontal = 16.dp,
-                vertical = 0.dp
-              ),
+              contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),
               modifier = Modifier
-                .height(48.dp)
+                .height(44.dp)
                 .testTag("search_button")
             ) {
               Text(
@@ -301,22 +355,21 @@ fun AdBlockTestScreen() {
             }
           }
 
-          // Row 2: Always-visible Ad Block ON/OFF Switch + Live Blocked Counter + Reload button
+          // Row 2: Stealth Ad Blocker Shield Bar + Live Animated Counter + Auto-Reload Switch
           Row(
             modifier = Modifier
               .fillMaxWidth()
-              .clip(RoundedCornerShape(14.dp))
-              .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f))
+              .clip(RoundedCornerShape(16.dp))
+              .background(shieldCardBg)
               .border(
                 width = 1.dp,
-                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
-                shape = RoundedCornerShape(14.dp)
+                color = shieldBorderColor,
+                shape = RoundedCornerShape(16.dp)
               )
               .padding(horizontal = 12.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
           ) {
-            // Left: Shield icon + Ad Block status + Live blocked counter badge
             Row(
               verticalAlignment = Alignment.CenterVertically,
               horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -324,19 +377,20 @@ fun AdBlockTestScreen() {
             ) {
               Box(
                 modifier = Modifier
-                  .size(32.dp)
+                  .size(34.dp)
+                  .scale(shieldIconScale)
                   .clip(CircleShape)
                   .background(
                     if (isAdBlockEnabled) {
-                      MaterialTheme.colorScheme.primaryContainer
+                      MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
                     } else {
-                      MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)
+                      MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
                     }
                   ),
                 contentAlignment = Alignment.Center
               ) {
                 Icon(
-                  imageVector = Icons.Outlined.Shield,
+                  imageVector = if (isAdBlockEnabled) Icons.Filled.Shield else Icons.Outlined.Shield,
                   contentDescription = null,
                   tint = if (isAdBlockEnabled) {
                     MaterialTheme.colorScheme.primary
@@ -360,7 +414,7 @@ fun AdBlockTestScreen() {
                   Surface(
                     shape = RoundedCornerShape(6.dp),
                     color = if (isAdBlockEnabled) {
-                      MaterialTheme.colorScheme.primaryContainer
+                      MaterialTheme.colorScheme.primary
                     } else {
                       MaterialTheme.colorScheme.surface
                     }
@@ -373,32 +427,38 @@ fun AdBlockTestScreen() {
                       },
                       style = MaterialTheme.typography.labelMedium,
                       color = if (isAdBlockEnabled) {
-                        MaterialTheme.colorScheme.onPrimaryContainer
+                        MaterialTheme.colorScheme.onPrimary
                       } else {
                         MaterialTheme.colorScheme.onSurfaceVariant
                       },
-                      modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                      modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
                     )
                   }
                 }
 
-                // Live counter of blocked requests on the current page
-                Text(
-                  text = if (filterStatus.isSyncing) {
-                    "${stringResource(R.string.blocked_requests_count, blockedCount)} · Updating lists…"
-                  } else {
-                    stringResource(R.string.blocked_requests_count, blockedCount)
+                // Smooth animated live counter
+                AnimatedContent(
+                  targetState = blockedCount,
+                  transitionSpec = {
+                    (slideInVertically { height -> height / 2 } + fadeIn(tween(150)))
+                      .togetherWith(slideOutVertically { height -> -height / 2 } + fadeOut(tween(150)))
                   },
-                  style = MaterialTheme.typography.labelMedium,
-                  color = MaterialTheme.colorScheme.onSurfaceVariant,
-                  maxLines = 1,
-                  overflow = TextOverflow.Ellipsis,
-                  modifier = Modifier.testTag("blocked_counter_text")
-                )
+                  label = "blockedCounterAnim"
+                ) { count ->
+                  val statusSuffix = if (filterStatus.isSyncing) " · Syncing lists…" else " · Stealth active"
+                  Text(
+                    text = stringResource(R.string.blocked_requests_count, count) +
+                      if (isAdBlockEnabled) statusSuffix else "",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.testTag("blocked_counter_text")
+                  )
+                }
               }
             }
 
-            // Right: Reload button + ON/OFF Switch (auto-reloads current page when toggled)
             Row(
               verticalAlignment = Alignment.CenterVertically,
               horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -409,14 +469,14 @@ fun AdBlockTestScreen() {
                   webViewInstance?.reload()
                 },
                 modifier = Modifier
-                  .size(48.dp)
+                  .size(42.dp)
                   .testTag("reload_button")
               ) {
                 Icon(
                   imageVector = Icons.Outlined.Refresh,
                   contentDescription = stringResource(R.string.reload_page),
                   tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                  modifier = Modifier.size(20.dp)
+                  modifier = Modifier.size(19.dp)
                 )
               }
 
@@ -425,7 +485,6 @@ fun AdBlockTestScreen() {
                 onCheckedChange = { enabled ->
                   AdBlocker.setEnabled(enabled, context)
                   AdBlocker.resetBlockedCount()
-                  // Clear WebView in-memory resource cache so reload genuinely re-fetches or blocks ads
                   webViewInstance?.clearCache(false)
                   webViewInstance?.reload()
                 },
@@ -438,12 +497,12 @@ fun AdBlockTestScreen() {
             }
           }
 
-          // Quick test pills for one-tap testing of ad-heavy websites
+          // Row 3: Quick Test Presets
           Row(
             modifier = Modifier
               .fillMaxWidth()
               .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically
           ) {
             Text(
@@ -452,9 +511,14 @@ fun AdBlockTestScreen() {
               color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             QUICK_TEST_PRESETS.forEach { preset ->
+              val isSelected = currentUrl.contains(preset.url.removePrefix("https://www."))
               Surface(
                 shape = RoundedCornerShape(999.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant,
+                color = if (isSelected) {
+                  MaterialTheme.colorScheme.primaryContainer
+                } else {
+                  MaterialTheme.colorScheme.surfaceVariant
+                },
                 modifier = Modifier
                   .clip(RoundedCornerShape(999.dp))
                   .clickable { loadInputOrSearch(preset.url) }
@@ -463,8 +527,12 @@ fun AdBlockTestScreen() {
                 Text(
                   text = preset.label,
                   style = MaterialTheme.typography.labelLarge,
-                  color = MaterialTheme.colorScheme.onSurface,
-                  modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                  color = if (isSelected) {
+                    MaterialTheme.colorScheme.onPrimaryContainer
+                  } else {
+                    MaterialTheme.colorScheme.onSurface
+                  },
+                  modifier = Modifier.padding(horizontal = 11.dp, vertical = 4.dp)
                 )
               }
             }
@@ -472,7 +540,6 @@ fun AdBlockTestScreen() {
         }
       }
 
-      // Subtle progress bar while loading page
       AnimatedVisibility(
         visible = loadProgress in 1..99,
         enter = fadeIn(),
@@ -490,10 +557,10 @@ fun AdBlockTestScreen() {
 
       HorizontalDivider(
         thickness = 1.dp,
-        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f)
+        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
       )
 
-      // Main WebView Container
+      // Main WebView + Fullscreen Video Container
       Box(
         modifier = Modifier
           .fillMaxWidth()
@@ -510,7 +577,6 @@ fun AdBlockTestScreen() {
                 ViewGroup.LayoutParams.MATCH_PARENT
               )
 
-              // Track user touch timestamps so AdBlocker can distinguish genuine taps from forced redirects
               setOnTouchListener { _, event ->
                 if (
                   event.action == MotionEvent.ACTION_DOWN ||
@@ -531,9 +597,14 @@ fun AdBlockTestScreen() {
                 loadWithOverviewMode = true
                 builtInZoomControls = true
                 displayZoomControls = false
-                setSupportMultipleWindows(true) // Enables onCreateWindow so pop-ups can be intercepted
+                setSupportMultipleWindows(true)
                 javaScriptCanOpenWindowsAutomatically = false
-                mediaPlaybackRequiresUserGesture = true
+                mediaPlaybackRequiresUserGesture = false // Allows video players to auto-play smoothly after pre-roll skip
+
+                // Strip "; wv" and "Version/4.0" from User-Agent so websites treat WebView like mobile Brave/Chrome
+                userAgentString = userAgentString
+                  .replace("; wv)", ")")
+                  .replace("Version/4.0 ", "")
               }
 
               CookieManager.getInstance().setAcceptCookie(true)
@@ -555,18 +626,17 @@ fun AdBlockTestScreen() {
                 ): Boolean {
                   val url = request.url?.toString() ?: return false
 
-                  // Keep http/https links inside the same WebView unless blocked as an ad redirect
                   if (!url.startsWith("http://", ignoreCase = true) &&
                     !url.startsWith("https://", ignoreCase = true)
                   ) {
-                    return true // Ignore custom external intent:// or market:// schemes
+                    return true
                   }
 
                   if (AdBlocker.shouldBlockNavigation(request, currentMainUrlRef.get(), lastUserTouchTimeMs)) {
                     return true
                   }
 
-                  return false // Open link in the same WebView
+                  return false
                 }
 
                 override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
@@ -581,6 +651,10 @@ fun AdBlockTestScreen() {
                     }
                   }
                   canGoBack = view.canGoBack()
+                  // Inject stealth anti-adblock shield as early as possible
+                  if (AdBlocker.isEnabled()) {
+                    view.evaluateJavascript(AdBlocker.cosmeticScript(url), null)
+                  }
                 }
 
                 override fun onPageCommitVisible(view: WebView, url: String?) {
@@ -603,9 +677,24 @@ fun AdBlockTestScreen() {
               webChromeClient = object : WebChromeClient() {
                 override fun onProgressChanged(view: WebView?, newProgress: Int) {
                   loadProgress = newProgress
-                  if (newProgress >= 60 && view != null && AdBlocker.isEnabled()) {
+                  if (view != null && AdBlocker.isEnabled() && (newProgress >= 15)) {
                     view.evaluateJavascript(AdBlocker.cosmeticScript(view.url), null)
                   }
+                }
+
+                override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
+                  if (customFullscreenView != null) {
+                    callback?.onCustomViewHidden()
+                    return
+                  }
+                  customFullscreenView = view
+                  customViewCallback = callback
+                }
+
+                override fun onHideCustomView() {
+                  customFullscreenView = null
+                  customViewCallback?.onCustomViewHidden()
+                  customViewCallback = null
                 }
 
                 override fun onCreateWindow(
@@ -636,6 +725,36 @@ fun AdBlockTestScreen() {
             canGoBack = wv.canGoBack()
           }
         )
+
+        // Fullscreen HTML5 video container when user taps fullscreen inside a video player
+        if (customFullscreenView != null) {
+          AndroidView(
+            modifier = Modifier
+              .fillMaxSize()
+              .background(androidx.compose.ui.graphics.Color.Black),
+            factory = { ctx ->
+              FrameLayout(ctx).apply {
+                layoutParams = ViewGroup.LayoutParams(
+                  ViewGroup.LayoutParams.MATCH_PARENT,
+                  ViewGroup.LayoutParams.MATCH_PARENT
+                )
+              }
+            },
+            update = { container ->
+              container.removeAllViews()
+              customFullscreenView?.let { v ->
+                (v.parent as? ViewGroup)?.removeView(v)
+                container.addView(
+                  v,
+                  FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                  )
+                )
+              }
+            }
+          )
+        }
       }
     }
   }
