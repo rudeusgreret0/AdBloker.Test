@@ -1,0 +1,13 @@
+<resources>
+    <string name="app_name">AdBlock Test</string>
+    <string name="address_bar_hint">Search Google or type a URL</string>
+    <string name="search_button">Search</string>
+    <string name="ad_block_label">Ad Blocker</string>
+    <string name="ad_block_on">ON</string>
+    <string name="ad_block_off">OFF</string>
+    <string name="blocked_requests_count">%1$d blocked on this page</string>
+    <string name="navigate_back">Back</string>
+    <string name="reload_page">Reload</string>
+    <string name="clear_input">Clear</string>
+    <string name="quick_test_sites">Quick Test Sites</string>
+</resources>
